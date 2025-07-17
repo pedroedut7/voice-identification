@@ -13,7 +13,6 @@ Implementa uma pipeline completa para identificação de voz utilizando:
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 from scipy import signal
 from scipy.fft import fft, fftfreq
 import librosa
@@ -33,7 +32,9 @@ warnings.filterwarnings('ignore')
 class VoiceIdentificationPipeline:
     """Pipeline principal para identificação de voz com dataset Common Voice"""
     
-    def __init__(self, sample_rate=16000, n_fft=2048, hop_length=512):
+    EXPECTED_NUM_FEATURES = 0
+    
+    def __init__(self, sample_rate=16000, features_to_use=[1,1,1,1,1,1], n_fft=2048, hop_length=512):
         """
         Inicializa a pipeline de identificação de voz
         
@@ -43,6 +44,7 @@ class VoiceIdentificationPipeline:
             hop_length (int): Tamanho do passo para análise
         """
         self.sample_rate = sample_rate
+        self.features_to_use = features_to_use
         self.n_fft = n_fft
         self.hop_length = hop_length
         self.scaler = StandardScaler()
@@ -51,6 +53,11 @@ class VoiceIdentificationPipeline:
         self.features = None
         self.labels = None
         self.audio_data_cache = {} # Cache para armazenar áudios carregados
+        self.calculate_exepcted_number_of_features()
+
+    def calculate_exepcted_number_of_features(self):
+        self.EXPECTED_NUM_FEATURES += self.features_to_use[0] * 3 + self.features_to_use[1] * 5 + self.features_to_use[2] * 5
+        self.EXPECTED_NUM_FEATURES += self.features_to_use[3] * 52 + self.features_to_use[4] * 104 + self.features_to_use[5] * 2 
         
     def extract_common_voice_dataset(self, tar_gz_path, extract_path='cv-corpus'):
         """
@@ -192,107 +199,147 @@ class VoiceIdentificationPipeline:
         Returns:
             np.array: Características extraídas.
         """
+
+        USE_FTT_SPECTRAL_FEATURES = self.features_to_use[0]
+        USE_SPECTRAL_STATS = self.features_to_use[1]
+        USE_FREQUENCY_BANDS = self.features_to_use[2]
+        USE_MFCC = self.features_to_use[3]
+        USE_MFCC_DELTA = self.features_to_use[4]
+        USE_ZERO_CROSS_RATE = self.features_to_use[5]
         features = []
 
         # 1. FFT Spectral Features
         # Garante que audio_data não esteja vazio para FFT
         if len(audio_data) == 0:
-            return np.zeros(121) # Tamanho total das características (ajustado para incluir deltas)
+            return np.zeros(171) # Tamanho total das características (ajustado para incluir deltas)
 
-        try:
+        if USE_FTT_SPECTRAL_FEATURES:
+            try:
+                fft_spectrum = np.abs(fft(audio_data, n=self.n_fft))
+                fft_spectrum = fft_spectrum[:self.n_fft//2]  # Apenas metade positiva
+
+                # Evita divisão por zero para np.sum(fft_spectrum)
+                if np.sum(fft_spectrum) == 0:
+                    spectral_centroid = 0
+                    spectral_rolloff = 0
+                    spectral_bandwidth = 0
+                else:
+                    spectral_centroid = np.sum(fft_spectrum * np.arange(len(fft_spectrum))) / np.sum(fft_spectrum)
+                    spectral_rolloff = np.percentile(fft_spectrum, 85)
+                    spectral_bandwidth = np.sqrt(np.sum(((np.arange(len(fft_spectrum)) - spectral_centroid) ** 2) * fft_spectrum) / np.sum(fft_spectrum))
+
+                fft_spectral_features = [spectral_centroid, spectral_rolloff, spectral_bandwidth] 
+                features.extend(fft_spectral_features)
+            except:
+                # print(f"Erro na extração de características FFT: {e}. Usando zeros.") # Descomentar para debug
+                features.extend([0] * 3) # 3 espectrais + 5 estatísticas + 5 bandas
+
+        if USE_SPECTRAL_STATS:
             fft_spectrum = np.abs(fft(audio_data, n=self.n_fft))
             fft_spectrum = fft_spectrum[:self.n_fft//2]  # Apenas metade positiva
 
-            # Evita divisão por zero para np.sum(fft_spectrum)
-            if np.sum(fft_spectrum) == 0:
-                spectral_centroid = 0
-                spectral_rolloff = 0
-                spectral_bandwidth = 0
-            else:
-                spectral_centroid = np.sum(fft_spectrum * np.arange(len(fft_spectrum))) / np.sum(fft_spectrum)
-                spectral_rolloff = np.percentile(fft_spectrum, 85)
-                spectral_bandwidth = np.sqrt(np.sum(((np.arange(len(fft_spectrum)) - spectral_centroid) ** 2) * fft_spectrum) / np.sum(fft_spectrum))
-
-            features.extend([spectral_centroid, spectral_rolloff, spectral_bandwidth])
-
-            # 2. Características estatísticas do espectro
-            features.extend([
-                np.mean(fft_spectrum),
-                np.std(fft_spectrum),
-                np.max(fft_spectrum),
-                np.min(fft_spectrum),
-                np.median(fft_spectrum)
-            ])
+            try:
+                # 2. Características estatísticas do espectro
+                spectral_stats = [
+                    np.mean(fft_spectrum),
+                    np.std(fft_spectrum),
+                    np.max(fft_spectrum),
+                    np.min(fft_spectrum),
+                    np.median(fft_spectrum)
+                ]
+                features.extend(spectral_stats)
+            except:
+                # print(f"Erro na extração de características FFT: {e}. Usando zeros.") # Descomentar para debug
+                features.extend([0] * 5) # 3 espectrais + 5 estatísticas + 5 bandas
+                
 
             # 3. Energia em bandas de frequência específicas
-            freqs = fftfreq(self.n_fft, 1/self.sample_rate)[:self.n_fft//2]
+        if USE_FREQUENCY_BANDS:
+            fft_spectrum = np.abs(fft(audio_data, n=self.n_fft))
+            fft_spectrum = fft_spectrum[:self.n_fft//2]  # Apenas metade positiva
 
-            # Bandas de frequência para análise da fala
-            bands = [(0, 500), (500, 1000), (1000, 2000), (2000, 4000), (4000, 8000)]
-            for low, high in bands:
-                band_mask = (freqs >= low) & (freqs <= high)
-                band_energy = np.sum(fft_spectrum[band_mask])
-                features.append(band_energy)
+            try:
+                freqs = fftfreq(self.n_fft, 1/self.sample_rate)[:self.n_fft//2]
 
-        except Exception as e:
-            # print(f"Erro na extração de características FFT: {e}. Usando zeros.") # Descomentar para debug
-            features.extend([0] * (3 + 5 + len(bands))) # 3 espectrais + 5 estatísticas + 5 bandas
+                # Bandas de frequência para análise da fala
+                bands = [(0, 500), (500, 1000), (1000, 2000), (2000, 4000), (4000, 8000)]
+                for low, high in bands:
+                    band_mask = (freqs >= low) & (freqs <= high)
+                    band_energy = np.sum(fft_spectrum[band_mask])
+                    features.append(band_energy)
+            except Exception as e:
+                # print(f"Erro na extração de características FFT: {e}. Usando zeros.") # Descomentar para debug
+                features.extend([0] * 5) # 3 espectrais + 5 estatísticas + 5 bandas
 
         # 4. MFCC, Delta-MFCC e Delta-Delta-MFCC usando librosa (complementa FFT)
-        try:
-            # MFCCs exigem áudio não vazio
-            if len(audio_data) > 0:
-                # Calcula os MFCCs
-                mfccs = librosa.feature.mfcc(y=audio_data, sr=self.sample_rate, n_mfcc=13)
+        # MFCCs exigem áudio não vazio
+        if USE_MFCC:    
+            try:
+                if len(audio_data) > 0:
+                    # Calcula os MFCCs
+                    mfccs = librosa.feature.mfcc(y=audio_data, sr=self.sample_rate, n_mfcc=13)
 
-                # Calcula os Delta-MFCCs (primeira derivada)
-                delta_mfccs = librosa.feature.delta(mfccs)
+                    # Combina as características estatísticas para MFCCs, Delta e Delta-Delta
+                    mfcc_features_base = [
+                        np.mean(mfccs, axis=1),
+                        np.std(mfccs, axis=1),
+                        np.max(mfccs, axis=1),
+                        np.min(mfccs, axis=1)
+                    ]
+                    mfcc_features_processed = np.concatenate(mfcc_features_base).flatten() 
+                    features.extend(mfcc_features_processed)
 
-                # Calcula os Delta-Delta-MFCCs (segunda derivada)
-                delta2_mfccs = librosa.feature.delta(mfccs, order=2)
+                    # Calcula os Delta-MFCCs (primeira derivada)
+                    delta_mfccs = librosa.feature.delta(mfccs)
+                else:
+                    # 13 MFCCs * 4 estatísticas (base) + 13 MFCCs * 4 estatísticas (delta) + 13 MFCCs * 4 estatísticas (delta-delta)
+                    features.extend([0] * 52) # Total de 156 características para MFCCs e suas derivadas
+            except Exception as e:
+                # print(f"Erro na extração de MFCCs e derivadas: {e}. Usando zeros.") # Descomentar para debug
+                features.extend([0] * 52) # Total de 156 características para MFCCs e suas derivadas
 
-                # Combina as características estatísticas para MFCCs, Delta e Delta-Delta
-                mfcc_features_base = [
-                    np.mean(mfccs, axis=1),
-                    np.std(mfccs, axis=1),
-                    np.max(mfccs, axis=1),
-                    np.min(mfccs, axis=1)
-                ]
-                features.extend(np.concatenate(mfcc_features_base).flatten())
+        if USE_MFCC_DELTA:
+            try:
+                if len(audio_data) > 0:
+                    mfccs = librosa.feature.mfcc(y=audio_data, sr=self.sample_rate, n_mfcc=13)
+                    delta_mfccs = librosa.feature.delta(mfccs)
+                    # Calcula os Delta-Delta-MFCCs (segunda derivada)
+                    delta2_mfccs = librosa.feature.delta(mfccs, order=2)
+                    mfcc_features_delta = [
+                        np.mean(delta_mfccs, axis=1),
+                        np.std(delta_mfccs, axis=1),
+                        np.max(delta_mfccs, axis=1),
+                        np.min(delta_mfccs, axis=1)
+                    ]
+                    mfcc_features_delta_processed = np.concatenate(mfcc_features_delta).flatten() 
+                    features.extend(mfcc_features_delta_processed)
 
-                mfcc_features_delta = [
-                    np.mean(delta_mfccs, axis=1),
-                    np.std(delta_mfccs, axis=1),
-                    np.max(delta_mfccs, axis=1),
-                    np.min(delta_mfccs, axis=1)
-                ]
-                features.extend(np.concatenate(mfcc_features_delta).flatten())
-
-                mfcc_features_delta2 = [
-                    np.mean(delta2_mfccs, axis=1),
-                    np.std(delta2_mfccs, axis=1),
-                    np.max(delta2_mfccs, axis=1),
-                    np.min(delta2_mfccs, axis=1)
-                ]
-                features.extend(np.concatenate(mfcc_features_delta2).flatten())
-
-            else:
-                # 13 MFCCs * 4 estatísticas (base) + 13 MFCCs * 4 estatísticas (delta) + 13 MFCCs * 4 estatísticas (delta-delta)
-                features.extend([0] * (52 + 52 + 52)) # Total de 156 características para MFCCs e suas derivadas
-        except Exception as e:
-            # print(f"Erro na extração de MFCCs e derivadas: {e}. Usando zeros.") # Descomentar para debug
-            features.extend([0] * (52 + 52 + 52)) # Total de 156 características para MFCCs e suas derivadas
+                    mfcc_features_delta2 = [
+                        np.mean(delta2_mfccs, axis=1),
+                        np.std(delta2_mfccs, axis=1),
+                        np.max(delta2_mfccs, axis=1),
+                        np.min(delta2_mfccs, axis=1)
+                    ]
+                    mfcc_features_delta2_processed = np.concatenate(mfcc_features_delta2).flatten() 
+                    features.extend(mfcc_features_delta2_processed)
+                else:
+                    features.extend([0] * (52 + 52))
+            except Exception as e:
+                # print(f"Erro na extração de MFCCs e derivadas: {e}. Usando zeros.") # Descomentar para debug
+                features.extend([0] * (52 + 52))
 
         # 5. Zero Crossing Rate
-        try:
-            if len(audio_data) > 0:
-                zcr = librosa.feature.zero_crossing_rate(audio_data)[0]
-                features.extend([np.mean(zcr), np.std(zcr)])
-            else:
+        if USE_ZERO_CROSS_RATE:
+            try:
+                if len(audio_data) > 0:
+                    zcr = librosa.feature.zero_crossing_rate(audio_data)[0]
+                    zcr_features = [np.mean(zcr), np.std(zcr)]
+                    features.extend(zcr_features)
+                else:
+                    features.extend([0] * 2)
+            except Exception as e:
+                # print(f"Erro na extração de ZCR: {e}. Usando zeros.") # Descomentar para debug
                 features.extend([0] * 2)
-        except Exception as e:
-            # print(f"Erro na extração de ZCR: {e}. Usando zeros.") # Descomentar para debug
-            features.extend([0] * 2)
 
         return np.array(features)
     
@@ -309,7 +356,6 @@ class VoiceIdentificationPipeline:
         """
         
         AUDIO_SAMPLES_FOLDER = 'clips'
-        EXPECTED_NUM_FEATURES = 171
         
         features_list = []
         labels_list = []
@@ -338,7 +384,7 @@ class VoiceIdentificationPipeline:
                 processed_audio = self.preprocess_audio(audio_data)
                 features = self.extract_fft_features(processed_audio)
                 
-                if features.shape[0] != EXPECTED_NUM_FEATURES: 
+                if features.shape[0] != self.EXPECTED_NUM_FEATURES: 
                     print(f"Aviso: Número inesperado de características ({features.shape[0]}) para {audio_path}. Pulando.") # Descomentar para debug
                     continue
 
